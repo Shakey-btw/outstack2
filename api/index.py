@@ -5,7 +5,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.main import app
-from vercel_func_adapter import VercelASGIHandler
 
-handler = VercelASGIHandler(app)
+# Vercel's @vercel/python builder automatically handles ASGI apps
+# Just export the app directly
+handler = app
 
