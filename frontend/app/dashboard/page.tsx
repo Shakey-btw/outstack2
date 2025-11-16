@@ -12,7 +12,9 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
-import { Info, RefreshCw, X, Loader2 } from "lucide-react"
+import { Info, X } from "lucide-react"
+import { Spinner } from "@/components/ui/spinner"
+import { ArrowCounterClockwiseIcon } from "@/components/ui/icons/akar-icons-arrow-counter-clockwise"
 
 interface CampaignData {
   campaign_id: string
@@ -43,19 +45,8 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null)
   const [selectedMailboxInfo, setSelectedMailboxInfo] = useState<{ email: string; campaigns: string[] } | null>(null)
 
-  useEffect(() => {
-    const loadData = async () => {
-      // First load campaigns, then load mailboxes after campaigns are done
-      // This prevents resource contention and rate limiting issues
-      await fetchCampaigns()
-      // Wait a bit to let the backend recover from campaigns processing
-      await new Promise(resolve => setTimeout(resolve, 500))
-      await fetchMailboxes()
-    }
-    loadData()
-  }, [])
-
   const fetchCampaigns = async (isRefresh = false) => {
+    console.log("[fetchCampaigns] Starting fetch, isRefresh:", isRefresh)
     try {
       if (isRefresh) {
         setRefreshingCampaigns(true)
@@ -63,6 +54,7 @@ export default function DashboardPage() {
         setLoading(true)
       }
       setError(null)
+      console.log("[fetchCampaigns] Making API call to http://localhost:8000/api/campaigns/dashboard")
       const response = await fetch("http://localhost:8000/api/campaigns/dashboard", {
         method: "GET",
         headers: {
@@ -76,12 +68,14 @@ export default function DashboardPage() {
       }
       
       const data = await response.json()
+      console.log("[fetchCampaigns] Received data:", data?.length || 0, "campaigns")
       setCampaigns(Array.isArray(data) ? data : [])
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "An error occurred"
       setError(errorMessage)
-      console.error("Error fetching campaigns:", err)
+      console.error("[fetchCampaigns] Error:", err)
     } finally {
+      console.log("[fetchCampaigns] Finally block - setting loading to false")
       if (isRefresh) {
         setRefreshingCampaigns(false)
       } else {
@@ -91,9 +85,10 @@ export default function DashboardPage() {
   }
 
   const fetchMailboxes = async (isRefresh = false) => {
+    console.log("[fetchMailboxes] Starting fetch, isRefresh:", isRefresh, "mailboxesFetching:", mailboxesFetching)
     // Prevent multiple simultaneous fetches
     if (mailboxesFetching) {
-      console.log("Mailboxes fetch already in progress, skipping...")
+      console.log("[fetchMailboxes] Already in progress, skipping...")
       return
     }
     
@@ -104,6 +99,7 @@ export default function DashboardPage() {
       } else {
         setMailboxesLoading(true)
       }
+      console.log("[fetchMailboxes] Making API call to http://localhost:8000/api/mailboxes")
       const response = await fetch("http://localhost:8000/api/mailboxes", {
         method: "GET",
         headers: {
@@ -119,11 +115,13 @@ export default function DashboardPage() {
       }
       
       const data = await response.json()
+      console.log("[fetchMailboxes] Received data:", data?.length || 0, "mailboxes")
       setMailboxes(Array.isArray(data) ? data : [])
     } catch (err) {
-      console.error("Error fetching mailboxes:", err)
+      console.error("[fetchMailboxes] Error:", err)
       setMailboxes([]) // Reset to empty array on exception
     } finally {
+      console.log("[fetchMailboxes] Finally block - setting mailboxesLoading to false")
       setMailboxesFetching(false) // Clear fetching flag
       if (isRefresh) {
         setRefreshingMailboxes(false)
@@ -189,6 +187,24 @@ export default function DashboardPage() {
     }
   }
 
+  useEffect(() => {
+    console.log("[useEffect] Component mounted, starting data load")
+    const loadData = async () => {
+      // First load campaigns, then load mailboxes after campaigns are done
+      // This prevents resource contention and rate limiting issues
+      console.log("[useEffect] Calling fetchCampaigns")
+      await fetchCampaigns()
+      // Wait a bit to let the backend recover from campaigns processing
+      console.log("[useEffect] Waiting 500ms before fetching mailboxes")
+      await new Promise(resolve => setTimeout(resolve, 500))
+      console.log("[useEffect] Calling fetchMailboxes")
+      await fetchMailboxes()
+      console.log("[useEffect] Data load complete")
+    }
+    loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const setCampaignInactive = async (campaignId: string, campaignName: string) => {
     try {
       const response = await fetch(`http://localhost:8000/api/campaigns/${campaignId}/set-inactive`, {
@@ -213,17 +229,17 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="container mx-auto py-12 px-4 max-w-7xl">
+    <div className="container mx-auto max-w-7xl">
 
       {error && (
-        <Card className="mb-8 border-red-200 bg-red-50">
+        <Card className="mb-8 border-destructive/50 bg-destructive/10">
           <CardContent className="pt-6">
-            <p className="text-sm text-red-700 mb-4">Error: {error}</p>
+            <p className="text-sm text-destructive-foreground mb-4">Error: {error}</p>
             <Button
               onClick={() => fetchCampaigns(true)}
               variant="outline"
               size="sm"
-              className="border-red-300 text-red-700 hover:bg-red-100"
+              className="border-destructive/50 text-destructive hover:bg-destructive/10"
             >
               Retry
             </Button>
@@ -231,70 +247,62 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      <div className="mb-8 flex justify-between items-center">
-        <h2 className="text-lg font-normal text-gray-800">Running Campaigns</h2>
+      <div className="mt-5 mb-5 flex justify-end">
         <Button
           onClick={() => fetchCampaigns(true)}
           disabled={loading || refreshingCampaigns}
           variant="outline"
-          size="sm"
-          className="h-8 px-2 text-xs"
+          size="icon"
+          className="h-8 w-8"
         >
-          {refreshingCampaigns ? (
-            <>
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Refreshing...
-            </>
+          {loading || refreshingCampaigns ? (
+            <Spinner className="h-4 w-4" />
           ) : (
-            <>
-              <RefreshCw className="h-3 w-3" />
-              Refresh
-            </>
+            <ArrowCounterClockwiseIcon className="h-4 w-4" />
           )}
         </Button>
       </div>
 
-      {loading ? null : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="text-gray-700">Campaign Name</TableHead>
-                  <TableHead className="text-right text-gray-700">Companies</TableHead>
-                  <TableHead className="text-right text-gray-700">People</TableHead>
-                  <TableHead className="text-right text-gray-700">People Engaged</TableHead>
-                  <TableHead className="text-right text-gray-700">Open Rate (%)</TableHead>
-                  <TableHead className="text-right text-gray-700">Reply Rate (%)</TableHead>
-                  {campaigns.some(c => c.campaign_status === "ended") && (
-                    <TableHead className="text-right text-gray-700">Status</TableHead>
-                  )}
-                </TableRow>
+      <Card>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-foreground">Campaign Name</TableHead>
+                <TableHead className="text-foreground">Companies</TableHead>
+                <TableHead className="text-foreground">People</TableHead>
+                <TableHead className="text-foreground">People Engaged</TableHead>
+                <TableHead className="text-foreground">Open Rate (%)</TableHead>
+                <TableHead className="text-foreground">Reply Rate (%)</TableHead>
+                {campaigns.some(c => c.campaign_status === "ended") && (
+                  <TableHead className="text-foreground">Status</TableHead>
+                )}
+              </TableRow>
                 {campaigns.length > 0 && (
                   <TableRow className="h-8">
-                    <TableCell className="text-xs text-gray-500 py-1">Total</TableCell>
-                    <TableCell className="text-right text-xs text-gray-500 py-1">
-                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                    <TableCell className="text-xs text-muted-foreground py-1">Total</TableCell>
+                    <TableCell className="text-xs text-muted-foreground py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-muted-foreground border border-border rounded-md bg-card">
                         {campaigns.reduce((sum, c) => sum + c.companies_count, 0).toLocaleString()}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right text-xs text-gray-500 py-1">
-                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                    <TableCell className="text-xs text-muted-foreground py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-muted-foreground border border-border rounded-md bg-card">
                         {campaigns.reduce((sum, c) => sum + c.people_count, 0).toLocaleString()}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right text-xs text-gray-500 py-1">
-                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                    <TableCell className="text-xs text-muted-foreground py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-muted-foreground border border-border rounded-md bg-card">
                         {campaigns.reduce((sum, c) => sum + c.people_engaged, 0).toLocaleString()}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                    <TableCell className="text-xs text-muted-foreground py-1">
                       {(() => {
                         const campaignsWithOpenRate = campaigns.filter(c => c.open_rate > 0);
                         if (campaignsWithOpenRate.length > 0) {
                           const avgOpenRate = campaignsWithOpenRate.reduce((sum, c) => sum + c.open_rate, 0) / campaignsWithOpenRate.length;
                           return (
-                            <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                            <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-muted-foreground border border-border rounded-md bg-card">
                               Ø {avgOpenRate.toFixed(2)}%
                             </span>
                           );
@@ -302,9 +310,9 @@ export default function DashboardPage() {
                         return "–";
                       })()}
                     </TableCell>
-                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                    <TableCell className="text-xs text-muted-foreground py-1">
                       {campaigns.length > 0 ? (
-                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-muted-foreground border border-border rounded-md bg-card">
                           Ø {(campaigns.reduce((sum, c) => sum + c.reply_rate, 0) / campaigns.length).toFixed(2)}%
                         </span>
                       ) : (
@@ -312,13 +320,19 @@ export default function DashboardPage() {
                       )}
                     </TableCell>
                     {campaigns.some(c => c.campaign_status === "ended") && (
-                      <TableCell className="text-right text-xs text-gray-500 py-1"></TableCell>
+                      <TableCell className="text-xs text-muted-foreground py-1"></TableCell>
                     )}
                   </TableRow>
                 )}
               </TableHeader>
               <TableBody>
-                {campaigns.length === 0 ? (
+                {loading ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-center text-muted-foreground py-12">
+                      Loading...
+                    </TableCell>
+                  </TableRow>
+                ) : campaigns.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={campaigns.some(c => c.campaign_status === "ended") ? 7 : 6} className="text-center text-muted-foreground py-12">
                       No running campaigns found
@@ -327,40 +341,40 @@ export default function DashboardPage() {
                 ) : (
                   campaigns.map((campaign) => (
                     <TableRow key={campaign.campaign_id}>
-                      <TableCell className="font-normal text-gray-800">
+                      <TableCell className="font-normal text-foreground">
                         {campaign.campaign_name}
                       </TableCell>
-                      <TableCell className="text-right">
-                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
+                      <TableCell>
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
                           {campaign.companies_count.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right">
-                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
+                      <TableCell>
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
                           {campaign.people_count.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right">
-                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
+                      <TableCell>
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
                           {campaign.people_engaged.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell>
                         {campaign.open_rate === 0 ? (
                           "–"
                         ) : (
-                          <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
+                          <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
                             {campaign.open_rate.toFixed(2)}%
                           </span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right">
-                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
+                      <TableCell>
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
                           {campaign.reply_rate.toFixed(2)}%
                         </span>
                       </TableCell>
                       {campaigns.some(c => c.campaign_status === "ended") && (
-                        <TableCell className="text-right">
+                        <TableCell>
                           {campaign.campaign_status === "ended" ? (
                             <Button
                               onClick={() => setCampaignInactive(campaign.campaign_id, campaign.campaign_name)}
@@ -379,45 +393,40 @@ export default function DashboardPage() {
             </Table>
           </CardContent>
         </Card>
-      )}
 
-      <Separator className="my-12" />
-
-      <div className="mb-8 flex justify-between items-center">
-        <h2 className="text-lg font-normal text-gray-800">Sender Mailboxes</h2>
+      <div className="mt-12 mb-5 flex justify-end">
         <Button
           onClick={() => fetchMailboxes(true)}
           disabled={mailboxesLoading || refreshingMailboxes || mailboxesFetching}
           variant="outline"
-          size="sm"
-          className="h-8 px-2 text-xs"
+          size="icon"
+          className="h-8 w-8"
         >
-          {refreshingMailboxes ? (
-            <>
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Refreshing...
-            </>
+          {mailboxesLoading || refreshingMailboxes ? (
+            <Spinner className="h-4 w-4" />
           ) : (
-            <>
-              <RefreshCw className="h-3 w-3" />
-              Refresh
-            </>
+            <ArrowCounterClockwiseIcon className="h-4 w-4" />
           )}
         </Button>
       </div>
 
-      {mailboxesLoading ? null : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="text-gray-700">Email Address</TableHead>
-                  <TableHead className="text-right text-gray-700">Status</TableHead>
-                </TableRow>
-              </TableHeader>
+      <Card>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-foreground">Email Address</TableHead>
+                <TableHead className="text-right text-foreground">Status</TableHead>
+              </TableRow>
+            </TableHeader>
               <TableBody>
-                {mailboxes.length === 0 ? (
+                {mailboxesLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={2} className="text-center text-muted-foreground py-12">
+                      Loading...
+                    </TableCell>
+                  </TableRow>
+                ) : mailboxes.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={2} className="text-center text-muted-foreground py-12">
                       No mailboxes found
@@ -426,7 +435,7 @@ export default function DashboardPage() {
                 ) : (
                   mailboxes.map((mailbox) => (
                     <TableRow key={mailbox.email}>
-                      <TableCell className="font-normal text-gray-800">
+                      <TableCell className="font-normal text-foreground">
                         {mailbox.email}
                       </TableCell>
                       <TableCell className="text-right">
@@ -473,11 +482,11 @@ export default function DashboardPage() {
                                 Stop Lemwarm
                               </Button>
                             </>
-                          ) : (
-                            <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-700 border border-gray-200 rounded-md bg-white">
-                              {mailbox.status}
-                            </span>
-                          )}
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-foreground border border-border rounded-md bg-card">
+                                {mailbox.status.charAt(0).toUpperCase() + mailbox.status.slice(1)}
+                              </span>
+                            )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -487,7 +496,6 @@ export default function DashboardPage() {
             </Table>
           </CardContent>
         </Card>
-      )}
 
       {/* Info Popup */}
       {selectedMailboxInfo && (
@@ -499,7 +507,7 @@ export default function DashboardPage() {
           <Card className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 min-w-[300px] max-w-[500px]">
             <CardHeader className="pb-4">
               <div className="flex justify-between items-start">
-                <CardTitle className="text-sm font-normal text-gray-800">
+                <CardTitle className="text-sm font-normal text-foreground">
                   Campaigns for {selectedMailboxInfo.email}
                 </CardTitle>
                 <Button
@@ -517,7 +525,7 @@ export default function DashboardPage() {
                 {selectedMailboxInfo.campaigns.length > 0 ? (
                   <ul className="space-y-1">
                     {selectedMailboxInfo.campaigns.map((campaign, index) => (
-                      <li key={index} className="text-sm text-gray-700 py-2 px-3 hover:bg-gray-50 rounded-md">
+                      <li key={index} className="text-sm text-foreground py-2 px-3 hover:bg-muted rounded-md">
                         {campaign}
                       </li>
                     ))}

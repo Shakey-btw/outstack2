@@ -206,15 +206,18 @@ async def get_campaigns_dashboard():
             dashboard_data = []
             
             print(f"Processing {len(all_campaigns)} campaigns...")
-            for idx, campaign in enumerate(all_campaigns, 1):
+            
+            # Helper function to process a single campaign
+            async def process_campaign(campaign: Dict[str, Any], idx: int, total: int) -> Optional[CampaignData]:
+                """Process a single campaign and return CampaignData or None if failed"""
                 campaign_id = campaign.get("_id") if isinstance(campaign, dict) else getattr(campaign, "_id", None)
                 campaign_name = campaign.get("name", "Unnamed Campaign") if isinstance(campaign, dict) else getattr(campaign, "name", "Unnamed Campaign")
                 
                 if not campaign_id:
-                    print(f"[{idx}/{len(all_campaigns)}] Skipping campaign with no ID: {campaign_name}")
-                    continue
+                    print(f"[{idx}/{total}] Skipping campaign with no ID: {campaign_name}")
+                    return None
                 
-                print(f"[{idx}/{len(all_campaigns)}] Processing campaign: {campaign_name} (ID: {campaign_id})")
+                print(f"[{idx}/{total}] Processing campaign: {campaign_name} (ID: {campaign_id})")
                 
                 try:
                     # Fetch leads for this campaign
@@ -229,19 +232,19 @@ async def get_campaigns_dashboard():
                             operation_name=f"fetching leads for {campaign_name}"
                         )
                         if leads_response is None:
-                            print(f"[{idx}/{len(all_campaigns)}] Failed to fetch leads for {campaign_name} after retries, skipping campaign")
-                            continue
+                            print(f"[{idx}/{total}] Failed to fetch leads for {campaign_name} after retries, skipping campaign")
+                            return None
                         
                         leads_response.raise_for_status()
                         leads_data = leads_response.json()
                     except httpx.TimeoutException:
-                        print(f"[{idx}/{len(all_campaigns)}] Timeout fetching leads for {campaign_name} after retries, skipping campaign")
-                        continue
+                        print(f"[{idx}/{total}] Timeout fetching leads for {campaign_name} after retries, skipping campaign")
+                        return None
                     except Exception as leads_error:
-                        print(f"[{idx}/{len(all_campaigns)}] Error fetching leads for {campaign_name}: {str(leads_error)}")
+                        print(f"[{idx}/{total}] Error fetching leads for {campaign_name}: {str(leads_error)}")
                         import traceback
                         traceback.print_exc()
-                        continue
+                        return None
                     
                     # Handle different response formats for leads
                     if isinstance(leads_data, list):
@@ -249,11 +252,11 @@ async def get_campaigns_dashboard():
                     elif isinstance(leads_data, dict):
                         leads = leads_data.get("leads", []) or leads_data.get("data", [])
                     else:
-                        print(f"[{idx}/{len(all_campaigns)}] Warning: Unexpected leads data format for {campaign_name}: {type(leads_data)}")
+                        print(f"[{idx}/{total}] Warning: Unexpected leads data format for {campaign_name}: {type(leads_data)}")
                         leads = []
                     
                     if not isinstance(leads, list):
-                        print(f"[{idx}/{len(all_campaigns)}] Warning: Leads is not a list for {campaign_name}, got {type(leads)}")
+                        print(f"[{idx}/{total}] Warning: Leads is not a list for {campaign_name}, got {type(leads)}")
                         leads = []
                     
                     # Filter out paused leads
@@ -263,7 +266,7 @@ async def get_campaigns_dashboard():
                     ]
                     
                     total_leads = len(active_leads)
-                    print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name}: {total_leads} active leads (out of {len(leads)} total)")
+                    print(f"[{idx}/{total}] Campaign {campaign_name}: {total_leads} active leads (out of {len(leads)} total)")
                     
                     # Check if there are any leads with "readyToSend" or "inProgress" status
                     has_active_leads = False
@@ -288,7 +291,7 @@ async def get_campaigns_dashboard():
                     
                     # Debug logging for campaign status
                     if campaign_status == "ended":
-                        print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} marked as 'ended' with {len(active_leads)} active leads. Sample states: {list(lead_states_found)[:5]}")
+                        print(f"[{idx}/{total}] Campaign {campaign_name} marked as 'ended' with {len(active_leads)} active leads. Sample states: {list(lead_states_found)[:5]}")
                     
                     # Count unique companies (non-null, non-empty companyName)
                     unique_companies = set()
@@ -306,6 +309,8 @@ async def get_campaigns_dashboard():
                     replies = 0
                     sent = 0
                     nb_leads_reached = 0
+                    unique_opens_count = 0
+                    unique_replies_count = 0
                     
                     # Fetch stats from activities endpoint
                     activities_errors = []
@@ -383,7 +388,7 @@ async def get_campaigns_dashboard():
                         replies = len(all_replies)
                         
                         if activities_errors:
-                            print(f"[{idx}/{len(all_campaigns)}] Warnings fetching activities for {campaign_name}: {len(activities_errors)} errors")
+                            print(f"[{idx}/{total}] Warnings fetching activities for {campaign_name}: {len(activities_errors)} errors")
                         
                         # Calculate nbLeadsreached: unique leads who received emails (were sent to)
                         unique_leads_reached = set()
@@ -410,14 +415,14 @@ async def get_campaigns_dashboard():
                         # Log summary of activities fetched
                         activities_duration = time.time() - activities_start_time
                         campaign_duration = time.time() - campaign_start_time
-                        print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} activities: {nb_leads_reached} reached, {unique_opens_count} opened, {unique_replies_count} replied (activities: {activities_duration:.1f}s, total: {campaign_duration:.1f}s)")
+                        print(f"[{idx}/{total}] Campaign {campaign_name} activities: {nb_leads_reached} reached, {unique_opens_count} opened, {unique_replies_count} replied (activities: {activities_duration:.1f}s, total: {campaign_duration:.1f}s)")
                         
                         if activities_errors:
-                            print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} had {len(activities_errors)} activity fetch errors (but continuing with partial data)")
+                            print(f"[{idx}/{total}] Campaign {campaign_name} had {len(activities_errors)} activity fetch errors (but continuing with partial data)")
                         
                     except Exception as stats_error:
                         # Stats endpoint failed completely, use default values
-                        print(f"[{idx}/{len(all_campaigns)}] ERROR: Could not fetch stats for campaign {campaign_name} ({campaign_id}): {str(stats_error)}")
+                        print(f"[{idx}/{total}] ERROR: Could not fetch stats for campaign {campaign_name} ({campaign_id}): {str(stats_error)}")
                         import traceback
                         traceback.print_exc()
                         unique_opens_count = 0
@@ -429,7 +434,7 @@ async def get_campaigns_dashboard():
                     open_rate = (unique_opens_count / nb_leads_reached * 100) if nb_leads_reached > 0 else 0.0
                     reply_rate = (unique_replies_count / nb_leads_reached * 100) if nb_leads_reached > 0 else 0.0
                     
-                    dashboard_data.append(CampaignData(
+                    campaign_data = CampaignData(
                         campaign_id=str(campaign_id),
                         campaign_name=str(campaign_name),
                         companies_count=companies_count,
@@ -438,24 +443,44 @@ async def get_campaigns_dashboard():
                         open_rate=round(open_rate, 2),
                         reply_rate=round(reply_rate, 2),
                         campaign_status=campaign_status
-                    ))
+                    )
                     campaign_total_duration = time.time() - campaign_start_time
-                    print(f"[{idx}/{len(all_campaigns)}] ✓ Successfully processed {campaign_name}: {total_leads} leads, {companies_count} companies, {people_engaged} engaged, {open_rate}% open, {reply_rate}% reply (total: {campaign_total_duration:.1f}s)")
+                    print(f"[{idx}/{total}] ✓ Successfully processed {campaign_name}: {total_leads} leads, {companies_count} companies, {people_engaged} engaged, {open_rate}% open, {reply_rate}% reply (total: {campaign_total_duration:.1f}s)")
+                    return campaign_data
                     
                 except httpx.HTTPStatusError as e:
                     # Log error but continue with other campaigns
                     print(f"Error processing campaign {campaign_id} ({campaign_name}): HTTP {e.response.status_code}: {e.response.text}")
-                    continue
+                    return None
                 except httpx.HTTPError as e:
                     # Log error but continue with other campaigns
                     print(f"Error processing campaign {campaign_id} ({campaign_name}): {str(e)}")
-                    continue
+                    return None
                 except Exception as e:
                     # Log error but continue with other campaigns
                     print(f"Unexpected error processing campaign {campaign_id} ({campaign_name}): {str(e)}")
                     import traceback
                     traceback.print_exc()
-                    continue
+                    return None
+            
+            # Process campaigns in batches of 2 to increase parallelization (max 8 concurrent calls: 2 campaigns × 4 activity calls)
+            batch_size = 2
+            for batch_start in range(0, len(all_campaigns), batch_size):
+                batch_end = min(batch_start + batch_size, len(all_campaigns))
+                batch = all_campaigns[batch_start:batch_end]
+                
+                # Process batch in parallel
+                batch_results = await asyncio.gather(
+                    *[process_campaign(campaign, batch_start + i + 1, len(all_campaigns)) for i, campaign in enumerate(batch)],
+                    return_exceptions=False
+                )
+                
+                # Add successful results to dashboard_data
+                for result in batch_results:
+                    if result is not None:
+                        dashboard_data.append(result)
+            
+            # Processing complete - batch processing handles all campaigns above
             
             total_duration = time.time() - start_time
             avg_campaign_time = total_duration / len(dashboard_data) if len(dashboard_data) > 0 else 0
