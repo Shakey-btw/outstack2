@@ -1,11 +1,13 @@
 import os
 import base64
+import asyncio
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
@@ -35,6 +37,73 @@ def get_auth_header() -> str:
     credentials = f":{LEMLIST_API_KEY}"
     encoded = base64.b64encode(credentials.encode()).decode()
     return f"Basic {encoded}"
+
+
+async def fetch_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    params: Dict[str, Any],
+    headers: Dict[str, str],
+    max_retries: int = 3,
+    base_timeout: float = 60.0,
+    retry_delay: float = 1.0,
+    operation_name: str = "API call"
+) -> Optional[httpx.Response]:
+    """
+    Fetch with retry logic and exponential backoff
+    """
+    for attempt in range(max_retries):
+        try:
+            timeout = base_timeout * (attempt + 1)  # Increase timeout with each retry
+            response = await client.get(url, params=params, headers=headers, timeout=timeout)
+            
+            # Check for rate limiting (429)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", retry_delay * (2 ** attempt)))
+                print(f"Rate limited (429) on {operation_name}, waiting {retry_after}s before retry {attempt + 1}/{max_retries}")
+                await asyncio.sleep(retry_after)
+                continue
+            
+            # Check for server errors (5xx) - retry these
+            if response.status_code >= 500:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    print(f"Server error {response.status_code} on {operation_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    response.raise_for_status()
+            
+            return response
+            
+        except httpx.TimeoutException as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Timeout on {operation_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"Timeout on {operation_name} after {max_retries} attempts")
+                raise
+        except httpx.HTTPStatusError as e:
+            # Don't retry on 4xx errors (except 429 which is handled above)
+            if e.response.status_code < 500:
+                raise
+            # Retry on 5xx errors
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"HTTP error {e.response.status_code} on {operation_name}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Error on {operation_name}: {str(e)}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    
+    return None
 
 
 class CampaignData(BaseModel):
@@ -76,20 +145,28 @@ async def get_campaigns_dashboard():
     auth_header = get_auth_header()
     headers = {"Authorization": auth_header}
     
+    start_time = time.time()
     try:
         async with httpx.AsyncClient() as client:
             # Step 1: Fetch all running campaigns (handle pagination)
             all_campaigns = []
             page = 0
+            print(f"Starting campaigns dashboard fetch at {time.strftime('%Y-%m-%d %H:%M:%S')}")
             
             while True:
                 try:
-                    response = await client.get(
+                    response = await fetch_with_retry(
+                        client,
                         f"{LEMLIST_BASE_URL}/campaigns",
                         params={"status": "running", "limit": 100, "offset": page * 100},
                         headers=headers,
-                        timeout=30.0
+                        base_timeout=60.0,
+                        operation_name=f"fetching campaigns page {page}"
                     )
+                    if response is None:
+                        print(f"Failed to fetch campaigns page {page} after retries")
+                        break
+                    
                     response.raise_for_status()
                     data = response.json()
                     
@@ -141,22 +218,30 @@ async def get_campaigns_dashboard():
                 
                 try:
                     # Fetch leads for this campaign
+                    campaign_start_time = time.time()
                     try:
-                        leads_response = await client.get(
+                        leads_response = await fetch_with_retry(
+                            client,
                             f"{LEMLIST_BASE_URL}/campaigns/{campaign_id}/export/leads",
                             params={"state": "all", "format": "json"},
                             headers=headers,
-                            timeout=60.0  # Increased timeout
+                            base_timeout=90.0,
+                            operation_name=f"fetching leads for {campaign_name}"
                         )
+                        if leads_response is None:
+                            print(f"[{idx}/{len(all_campaigns)}] Failed to fetch leads for {campaign_name} after retries, skipping campaign")
+                            continue
+                        
                         leads_response.raise_for_status()
+                        leads_data = leads_response.json()
                     except httpx.TimeoutException:
-                        print(f"[{idx}/{len(all_campaigns)}] Timeout fetching leads for {campaign_name}, using empty leads")
-                        leads_data = []
+                        print(f"[{idx}/{len(all_campaigns)}] Timeout fetching leads for {campaign_name} after retries, skipping campaign")
+                        continue
                     except Exception as leads_error:
                         print(f"[{idx}/{len(all_campaigns)}] Error fetching leads for {campaign_name}: {str(leads_error)}")
-                        leads_data = []
-                    else:
-                        leads_data = leads_response.json()
+                        import traceback
+                        traceback.print_exc()
+                        continue
                     
                     # Handle different response formats for leads
                     if isinstance(leads_data, list):
@@ -164,22 +249,30 @@ async def get_campaigns_dashboard():
                     elif isinstance(leads_data, dict):
                         leads = leads_data.get("leads", []) or leads_data.get("data", [])
                     else:
+                        print(f"[{idx}/{len(all_campaigns)}] Warning: Unexpected leads data format for {campaign_name}: {type(leads_data)}")
+                        leads = []
+                    
+                    if not isinstance(leads, list):
+                        print(f"[{idx}/{len(all_campaigns)}] Warning: Leads is not a list for {campaign_name}, got {type(leads)}")
                         leads = []
                     
                     # Filter out paused leads
                     active_leads = [
                         lead for lead in leads
-                        if isinstance(lead, dict) and lead.get("state_system") != "paused" and lead.get("state") != "paused"
+                        if isinstance(lead, dict) and lead.get("stateSystem") != "paused" and lead.get("state") != "paused"
                     ]
                     
                     total_leads = len(active_leads)
+                    print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name}: {total_leads} active leads (out of {len(leads)} total)")
                     
                     # Check if there are any leads with "readyToSend" or "inProgress" status
                     has_active_leads = False
+                    lead_states_found = set()
                     for lead in active_leads:
                         if isinstance(lead, dict):
                             state = lead.get("state", "")
                             state_system = lead.get("stateSystem", "")
+                            lead_states_found.add(f"state:{state}, stateSystem:{state_system}")
                             # Check for readyToSend in state or stateSystem
                             if state == "readyToSend" or state_system == "readyToSend":
                                 has_active_leads = True
@@ -189,8 +282,13 @@ async def get_campaigns_dashboard():
                                 has_active_leads = True
                                 break
                     
-                    # Set campaign status: "ended" if no active leads, otherwise "active" or similar
-                    campaign_status = "ended" if not has_active_leads else "active"
+                    # Set campaign status: "ended" if no active leads AND there are leads in the campaign
+                    # If there are no leads at all, consider it active (it's a running campaign)
+                    campaign_status = "ended" if (not has_active_leads and len(active_leads) > 0) else "active"
+                    
+                    # Debug logging for campaign status
+                    if campaign_status == "ended":
+                        print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} marked as 'ended' with {len(active_leads)} active leads. Sample states: {list(lead_states_found)[:5]}")
                     
                     # Count unique companies (non-null, non-empty companyName)
                     unique_companies = set()
@@ -210,31 +308,82 @@ async def get_campaigns_dashboard():
                     nb_leads_reached = 0
                     
                     # Fetch stats from activities endpoint
+                    activities_errors = []
+                    activities_start_time = time.time()
                     try:
-                        # Get all sent emails to calculate nbLeadsreached (unique leads who received emails)
-                        all_sent = []
-                        sent_page = 0
-                        while True:
-                            try:
-                                sent_response = await client.get(
-                                    f"{LEMLIST_BASE_URL}/activities",
-                                    params={"campaignId": campaign_id, "type": "emailsSent", "offset": sent_page * 100, "limit": 100},
-                                    headers=headers,
-                                    timeout=60.0  # Increased timeout
-                                )
-                            except httpx.TimeoutException:
-                                print(f"[{idx}/{len(all_campaigns)}] Timeout fetching sent emails for {campaign_name}")
-                                break
-                            if sent_response.status_code != 200:
-                                break
-                            sent_data = sent_response.json()
-                            if not isinstance(sent_data, list) or len(sent_data) == 0:
-                                break
-                            all_sent.extend(sent_data)
-                            if len(sent_data) < 100:
-                                break
-                            sent_page += 1
+                        # Helper function to fetch all pages of an activity type
+                        async def fetch_activity_pages(activity_type: str, max_pages: int = 100):
+                            """Fetch all pages of a specific activity type"""
+                            all_activities = []
+                            page = 0
+                            errors = []
+                            while page < max_pages:
+                                try:
+                                    response = await fetch_with_retry(
+                                        client,
+                                        f"{LEMLIST_BASE_URL}/activities",
+                                        params={"campaignId": campaign_id, "type": activity_type, "offset": page * 100, "limit": 100},
+                                        headers=headers,
+                                        base_timeout=60.0,
+                                        max_retries=2,
+                                        operation_name=f"fetching {activity_type} page {page} for {campaign_name}"
+                                    )
+                                    if response is None:
+                                        errors.append(f"Failed to fetch {activity_type} page {page}")
+                                        break
+                                    
+                                    if response.status_code != 200:
+                                        try:
+                                            error_text = response.text[:100] if hasattr(response, 'text') else str(response.status_code)
+                                        except:
+                                            error_text = f"Status {response.status_code}"
+                                        errors.append(f"HTTP {response.status_code} on {activity_type} page {page}: {error_text}")
+                                        break
+                                    
+                                    data = response.json()
+                                    if not isinstance(data, list):
+                                        errors.append(f"Unexpected {activity_type} data format on page {page}: {type(data)}")
+                                        break
+                                    
+                                    if len(data) == 0:
+                                        break
+                                    
+                                    all_activities.extend(data)
+                                    if len(data) < 100:
+                                        break
+                                    page += 1
+                                except httpx.TimeoutException:
+                                    errors.append(f"Timeout fetching {activity_type} page {page}")
+                                    break
+                                except Exception as e:
+                                    errors.append(f"Error fetching {activity_type} page {page}: {str(e)}")
+                                    break
+                            return all_activities, errors
+                        
+                        # Fetch all activity types in parallel
+                        sent_task = fetch_activity_pages("emailsSent")
+                        opens_task = fetch_activity_pages("emailsOpened")
+                        replies_task = fetch_activity_pages("emailsReplied")
+                        clicks_task = fetch_activity_pages("emailsClicked")
+                        
+                        # Wait for all to complete
+                        (all_sent, sent_errors), (all_opens, opens_errors), (all_replies, replies_errors), (all_clicks, clicks_errors) = await asyncio.gather(
+                            sent_task, opens_task, replies_task, clicks_task, return_exceptions=False
+                        )
+                        
+                        # Collect all errors
+                        activities_errors.extend(sent_errors)
+                        activities_errors.extend(opens_errors)
+                        activities_errors.extend(replies_errors)
+                        # Don't log clicks errors as they're not critical
+                        
+                        # All activity types are now fetched in parallel above
                         sent = len(all_sent)
+                        opens = len(all_opens)
+                        replies = len(all_replies)
+                        
+                        if activities_errors:
+                            print(f"[{idx}/{len(all_campaigns)}] Warnings fetching activities for {campaign_name}: {len(activities_errors)} errors")
                         
                         # Calculate nbLeadsreached: unique leads who received emails (were sent to)
                         unique_leads_reached = set()
@@ -243,80 +392,6 @@ async def get_campaigns_dashboard():
                                 unique_leads_reached.add(activity["leadId"])
                         nb_leads_reached = len(unique_leads_reached)
                         people_engaged = nb_leads_reached  # Use nbLeadsreached as people engaged
-                        
-                        # Get all opens
-                        all_opens = []
-                        opens_page = 0
-                        while True:
-                            try:
-                                opens_response = await client.get(
-                                    f"{LEMLIST_BASE_URL}/activities",
-                                    params={"campaignId": campaign_id, "type": "emailsOpened", "offset": opens_page * 100, "limit": 100},
-                                    headers=headers,
-                                    timeout=60.0  # Increased timeout
-                                )
-                            except httpx.TimeoutException:
-                                print(f"[{idx}/{len(all_campaigns)}] Timeout fetching opens for {campaign_name}")
-                                break
-                            if opens_response.status_code != 200:
-                                break
-                            opens_data = opens_response.json()
-                            if not isinstance(opens_data, list) or len(opens_data) == 0:
-                                break
-                            all_opens.extend(opens_data)
-                            if len(opens_data) < 100:
-                                break
-                            opens_page += 1
-                        opens = len(all_opens)
-                        
-                        # Get all replies
-                        all_replies = []
-                        replies_page = 0
-                        while True:
-                            try:
-                                replies_response = await client.get(
-                                    f"{LEMLIST_BASE_URL}/activities",
-                                    params={"campaignId": campaign_id, "type": "emailsReplied", "offset": replies_page * 100, "limit": 100},
-                                    headers=headers,
-                                    timeout=60.0  # Increased timeout
-                                )
-                            except httpx.TimeoutException:
-                                print(f"[{idx}/{len(all_campaigns)}] Timeout fetching replies for {campaign_name}")
-                                break
-                            if replies_response.status_code != 200:
-                                break
-                            replies_data = replies_response.json()
-                            if not isinstance(replies_data, list) or len(replies_data) == 0:
-                                break
-                            all_replies.extend(replies_data)
-                            if len(replies_data) < 100:
-                                break
-                            replies_page += 1
-                        replies = len(all_replies)
-                        
-                        # Get all clicks for engaged count
-                        all_clicks = []
-                        clicks_page = 0
-                        while True:
-                            try:
-                                clicks_response = await client.get(
-                                    f"{LEMLIST_BASE_URL}/activities",
-                                    params={"campaignId": campaign_id, "type": "emailsClicked", "offset": clicks_page * 100, "limit": 100},
-                                    headers=headers,
-                                    timeout=60.0  # Increased timeout
-                                )
-                            except httpx.TimeoutException:
-                                print(f"[{idx}/{len(all_campaigns)}] Timeout fetching clicks for {campaign_name}")
-                                break
-                            if clicks_response.status_code != 200:
-                                break
-                            clicks_data = clicks_response.json()
-                            if not isinstance(clicks_data, list) or len(clicks_data) == 0:
-                                break
-                            all_clicks.extend(clicks_data)
-                            if len(clicks_data) < 100:
-                                break
-                            clicks_page += 1
                         
                         # Count unique leads who opened (not total opens)
                         unique_opens_lead_ids = set()
@@ -332,9 +407,17 @@ async def get_campaigns_dashboard():
                                 unique_replies_lead_ids.add(activity["leadId"])
                         unique_replies_count = len(unique_replies_lead_ids)
                         
+                        # Log summary of activities fetched
+                        activities_duration = time.time() - activities_start_time
+                        campaign_duration = time.time() - campaign_start_time
+                        print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} activities: {nb_leads_reached} reached, {unique_opens_count} opened, {unique_replies_count} replied (activities: {activities_duration:.1f}s, total: {campaign_duration:.1f}s)")
+                        
+                        if activities_errors:
+                            print(f"[{idx}/{len(all_campaigns)}] Campaign {campaign_name} had {len(activities_errors)} activity fetch errors (but continuing with partial data)")
+                        
                     except Exception as stats_error:
-                        # Stats endpoint failed, use default values
-                        print(f"Warning: Could not fetch stats for campaign {campaign_id}: {str(stats_error)}")
+                        # Stats endpoint failed completely, use default values
+                        print(f"[{idx}/{len(all_campaigns)}] ERROR: Could not fetch stats for campaign {campaign_name} ({campaign_id}): {str(stats_error)}")
                         import traceback
                         traceback.print_exc()
                         unique_opens_count = 0
@@ -356,7 +439,8 @@ async def get_campaigns_dashboard():
                         reply_rate=round(reply_rate, 2),
                         campaign_status=campaign_status
                     ))
-                    print(f"Successfully processed campaign: {campaign_name}")
+                    campaign_total_duration = time.time() - campaign_start_time
+                    print(f"[{idx}/{len(all_campaigns)}] ✓ Successfully processed {campaign_name}: {total_leads} leads, {companies_count} companies, {people_engaged} engaged, {open_rate}% open, {reply_rate}% reply (total: {campaign_total_duration:.1f}s)")
                     
                 except httpx.HTTPStatusError as e:
                     # Log error but continue with other campaigns
@@ -373,7 +457,12 @@ async def get_campaigns_dashboard():
                     traceback.print_exc()
                     continue
             
-            print(f"Returning {len(dashboard_data)} campaigns in dashboard data")
+            total_duration = time.time() - start_time
+            avg_campaign_time = total_duration / len(dashboard_data) if len(dashboard_data) > 0 else 0
+            print(f"✓ Completed processing: {len(dashboard_data)}/{len(all_campaigns)} campaigns returned in {total_duration:.1f}s (avg {avg_campaign_time:.1f}s per campaign)")
+            if len(dashboard_data) < len(all_campaigns):
+                print(f"⚠ WARNING: {len(all_campaigns) - len(dashboard_data)} campaigns were skipped due to errors")
+            print(f"📊 Performance: Total time {total_duration:.1f}s for {len(dashboard_data)} campaigns = {avg_campaign_time:.1f}s/campaign average")
             return dashboard_data
     except HTTPException:
         raise
@@ -407,12 +496,16 @@ async def get_mailboxes():
             senders_data = senders_resp.json()
             
             if not isinstance(senders_data, list) or len(senders_data) == 0:
+                print("Warning: No team senders found or invalid format")
                 return []
             
             # Get userId from first sender (assuming single user for now)
             userId = senders_data[0].get("userId")
             if not userId:
+                print(f"Warning: No userId found in senders data: {senders_data}")
                 return []
+            
+            print(f"Found userId: {userId}")
             
             # Step 2: Get all mailboxes for this user
             user_resp = await client.get(
@@ -425,7 +518,10 @@ async def get_mailboxes():
             
             all_mailboxes = user_data.get("mailboxes", [])
             if not isinstance(all_mailboxes, list):
+                print(f"Warning: Mailboxes is not a list. Got: {type(all_mailboxes)}")
                 return []
+            
+            print(f"Found {len(all_mailboxes)} mailboxes for user {userId}")
             
             # Step 3: Get sender emails used in running campaigns
             # Get running campaigns with pagination
@@ -436,7 +532,7 @@ async def get_mailboxes():
                     f"{LEMLIST_BASE_URL}/campaigns",
                     params={"status": "running", "limit": 100, "offset": page * 100},
                     headers=headers,
-                    timeout=30.0
+                    timeout=60.0
                 )
                 campaigns_resp.raise_for_status()
                 campaigns_data = campaigns_resp.json()
@@ -466,6 +562,7 @@ async def get_mailboxes():
             # Also collect all campaigns each email is in (for info popup)
             emails_in_use = set()
             email_to_campaigns: Dict[str, List[str]] = {}  # Map email to list of campaign names
+            mailbox_id_to_emails: Dict[str, set] = {}  # Map mailbox_id to set of emails used in campaigns
             
             for campaign in all_running_campaigns:
                 campaign_id = campaign.get("_id")
@@ -477,7 +574,7 @@ async def get_mailboxes():
                             f"{LEMLIST_BASE_URL}/campaigns/{campaign_id}/export/leads",
                             params={"state": "all", "format": "json"},
                             headers=headers,
-                            timeout=30.0
+                            timeout=60.0
                         )
                         if leads_response.status_code == 200:
                             leads_data = leads_response.json()
@@ -514,7 +611,7 @@ async def get_mailboxes():
                             campaign_detail_resp = await client.get(
                                 f"{LEMLIST_BASE_URL}/campaigns/{campaign_id}",
                                 headers=headers,
-                                timeout=30.0
+                                timeout=60.0
                             )
                             if campaign_detail_resp.status_code == 200:
                                 campaign_detail = campaign_detail_resp.json()
@@ -522,17 +619,26 @@ async def get_mailboxes():
                                     for sender in campaign_detail["senders"]:
                                         # Only count senders that have an email field (not type: 'api', 'linkedinVisit', etc.)
                                         email = sender.get("email")
+                                        sender_mailbox_id = sender.get("sendUserMailboxId")
                                         if email and isinstance(email, str) and "@" in email:
                                             # Add to campaigns list for this email (for info popup)
                                             if email not in email_to_campaigns:
                                                 email_to_campaigns[email] = []
                                             email_to_campaigns[email].append(campaign_name)
                                             
+                                            # Track which mailbox_id uses which email
+                                            if sender_mailbox_id:
+                                                if sender_mailbox_id not in mailbox_id_to_emails:
+                                                    mailbox_id_to_emails[sender_mailbox_id] = set()
+                                                mailbox_id_to_emails[sender_mailbox_id].add(email)
+                                            
                                             # Only count as "in use" if campaign has active leads
                                             if has_active_leads:
                                                 emails_in_use.add(email)
                     except Exception as e:
-                        print(f"Error processing campaign {campaign_id}: {str(e)}")
+                        print(f"Error processing campaign {campaign_id} ({campaign_name}): {str(e)}")
+                        import traceback
+                        traceback.print_exc()
                         continue
             
             # Also check all campaigns (not just running) to get complete campaign list for info popup
@@ -543,7 +649,7 @@ async def get_mailboxes():
                     f"{LEMLIST_BASE_URL}/campaigns",
                     params={"limit": 100, "offset": page * 100},
                     headers=headers,
-                    timeout=30.0
+                    timeout=60.0
                 )
                 campaigns_resp.raise_for_status()
                 campaigns_data = campaigns_resp.json()
@@ -574,19 +680,27 @@ async def get_mailboxes():
                         campaign_detail_resp = await client.get(
                             f"{LEMLIST_BASE_URL}/campaigns/{campaign_id}",
                             headers=headers,
-                            timeout=30.0
+                            timeout=60.0
                         )
                         if campaign_detail_resp.status_code == 200:
                             campaign_detail = campaign_detail_resp.json()
                             if "senders" in campaign_detail:
                                 for sender in campaign_detail["senders"]:
                                     email = sender.get("email")
+                                    sender_mailbox_id = sender.get("sendUserMailboxId")
                                     if email and isinstance(email, str) and "@" in email:
                                         if email not in email_to_campaigns:
                                             email_to_campaigns[email] = []
                                         if campaign_name not in email_to_campaigns[email]:
                                             email_to_campaigns[email].append(campaign_name)
+                                        
+                                        # Track which mailbox_id uses which email (for all campaigns)
+                                        if sender_mailbox_id:
+                                            if sender_mailbox_id not in mailbox_id_to_emails:
+                                                mailbox_id_to_emails[sender_mailbox_id] = set()
+                                            mailbox_id_to_emails[sender_mailbox_id].add(email)
                     except Exception as e:
+                        print(f"Error processing campaign {campaign_id} for email mapping: {str(e)}")
                         continue
             
             # Create a map of mailbox_id to the email actually used in campaigns
@@ -610,10 +724,12 @@ async def get_mailboxes():
                                         # Use the email from the campaign (actual email being used)
                                         mailbox_id_to_campaign_email[sender_mailbox_id] = sender_email
                     except Exception as e:
+                        print(f"Error processing campaign {campaign_id} for email mapping: {str(e)}")
                         continue
             
             # Step 4: Build response with combined status
             mailbox_list = []
+            skipped_mailboxes = 0
             for mailbox in all_mailboxes:
                 mailbox_id = mailbox.get("_id", "")
                 # Use the email from campaigns if available, otherwise use mailbox email
@@ -621,10 +737,29 @@ async def get_mailboxes():
                 if not email:
                     email = mailbox.get("email", "")
                 
+                if not email:
+                    skipped_mailboxes += 1
+                    print(f"Warning: Skipping mailbox {mailbox_id} - no email found. Mailbox data: {mailbox}")
+                    continue
+                
                 if email:
-                    is_in_use = email in emails_in_use
+                    # Check if email is in use - check all emails associated with this mailbox_id
+                    mailbox_email = mailbox.get("email", "")
+                    # Get all emails used by this mailbox_id in campaigns
+                    campaign_emails = mailbox_id_to_emails.get(mailbox_id, set())
+                    # Check if any of these emails are in use
+                    is_in_use = (
+                        email in emails_in_use or 
+                        mailbox_email in emails_in_use or
+                        any(campaign_email in emails_in_use for campaign_email in campaign_emails)
+                    )
+                    
                     lemwarm = mailbox.get("lemwarm", {})
                     is_warming_up = lemwarm.get("active", False) if isinstance(lemwarm, dict) else False
+                    
+                    # Debug logging for status determination
+                    if email != mailbox_email:
+                        print(f"Mailbox {mailbox_id}: Using campaign email '{email}' (mailbox email: '{mailbox_email}')")
                     
                     # Determine status based on both conditions
                     if is_warming_up and is_in_use:
@@ -635,6 +770,10 @@ async def get_mailboxes():
                         status = "warming up"
                     else:
                         status = "stuck"
+                    
+                    # Debug logging for status
+                    if status in ["stuck", "conflict"]:
+                        print(f"Mailbox {email}: status={status}, is_in_use={is_in_use}, is_warming_up={is_warming_up}, campaigns={email_to_campaigns.get(email, [])}")
                     
                     # Get campaigns for this email (only for stuck/conflict statuses)
                     # Check both the mailbox email and campaign email
@@ -660,6 +799,14 @@ async def get_mailboxes():
             status_order = {"stuck": 0, "conflict": 1, "in use": 2, "warming up": 3}
             mailbox_list.sort(key=lambda x: (status_order.get(x.status, 99), x.email))
             
+            # Summary logging
+            status_counts = {}
+            for mb in mailbox_list:
+                status_counts[mb.status] = status_counts.get(mb.status, 0) + 1
+            
+            print(f"Returning {len(mailbox_list)} mailboxes (skipped {skipped_mailboxes} without email)")
+            print(f"Status breakdown: {status_counts}")
+            print(f"Emails in use: {len(emails_in_use)} unique emails")
             return mailbox_list
             
     except httpx.HTTPStatusError as e:

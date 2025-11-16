@@ -39,12 +39,20 @@ export default function DashboardPage() {
   const [mailboxesLoading, setMailboxesLoading] = useState(true)
   const [refreshingCampaigns, setRefreshingCampaigns] = useState(false)
   const [refreshingMailboxes, setRefreshingMailboxes] = useState(false)
+  const [mailboxesFetching, setMailboxesFetching] = useState(false) // Track if fetch is in progress
   const [error, setError] = useState<string | null>(null)
   const [selectedMailboxInfo, setSelectedMailboxInfo] = useState<{ email: string; campaigns: string[] } | null>(null)
 
   useEffect(() => {
-    fetchCampaigns()
-    fetchMailboxes()
+    const loadData = async () => {
+      // First load campaigns, then load mailboxes after campaigns are done
+      // This prevents resource contention and rate limiting issues
+      await fetchCampaigns()
+      // Wait a bit to let the backend recover from campaigns processing
+      await new Promise(resolve => setTimeout(resolve, 500))
+      await fetchMailboxes()
+    }
+    loadData()
   }, [])
 
   const fetchCampaigns = async (isRefresh = false) => {
@@ -83,7 +91,14 @@ export default function DashboardPage() {
   }
 
   const fetchMailboxes = async (isRefresh = false) => {
+    // Prevent multiple simultaneous fetches
+    if (mailboxesFetching) {
+      console.log("Mailboxes fetch already in progress, skipping...")
+      return
+    }
+    
     try {
+      setMailboxesFetching(true) // Mark as fetching immediately
       if (isRefresh) {
         setRefreshingMailboxes(true)
       } else {
@@ -99,6 +114,7 @@ export default function DashboardPage() {
       if (!response.ok) {
         const errorText = await response.text()
         console.error(`Failed to fetch mailboxes: ${response.status} ${response.statusText}. ${errorText}`)
+        setMailboxes([]) // Reset to empty array on error
         return
       }
       
@@ -106,7 +122,9 @@ export default function DashboardPage() {
       setMailboxes(Array.isArray(data) ? data : [])
     } catch (err) {
       console.error("Error fetching mailboxes:", err)
+      setMailboxes([]) // Reset to empty array on exception
     } finally {
+      setMailboxesFetching(false) // Clear fetching flag
       if (isRefresh) {
         setRefreshingMailboxes(false)
       } else {
@@ -252,6 +270,52 @@ export default function DashboardPage() {
                     <TableHead className="text-right text-gray-700">Status</TableHead>
                   )}
                 </TableRow>
+                {campaigns.length > 0 && (
+                  <TableRow className="h-8">
+                    <TableCell className="text-xs text-gray-500 py-1">Total</TableCell>
+                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                        {campaigns.reduce((sum, c) => sum + c.companies_count, 0).toLocaleString()}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                        {campaigns.reduce((sum, c) => sum + c.people_count, 0).toLocaleString()}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                        {campaigns.reduce((sum, c) => sum + c.people_engaged, 0).toLocaleString()}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                      {(() => {
+                        const campaignsWithOpenRate = campaigns.filter(c => c.open_rate > 0);
+                        if (campaignsWithOpenRate.length > 0) {
+                          const avgOpenRate = campaignsWithOpenRate.reduce((sum, c) => sum + c.open_rate, 0) / campaignsWithOpenRate.length;
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                              Ø {avgOpenRate.toFixed(2)}%
+                            </span>
+                          );
+                        }
+                        return "–";
+                      })()}
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-gray-500 py-1">
+                      {campaigns.length > 0 ? (
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-normal text-gray-600 border border-gray-200 rounded-md bg-white">
+                          Ø {(campaigns.reduce((sum, c) => sum + c.reply_rate, 0) / campaigns.length).toFixed(2)}%
+                        </span>
+                      ) : (
+                        "–"
+                      )}
+                    </TableCell>
+                    {campaigns.some(c => c.campaign_status === "ended") && (
+                      <TableCell className="text-right text-xs text-gray-500 py-1"></TableCell>
+                    )}
+                  </TableRow>
+                )}
               </TableHeader>
               <TableBody>
                 {campaigns.length === 0 ? (
@@ -323,7 +387,7 @@ export default function DashboardPage() {
         <h2 className="text-lg font-normal text-gray-800">Sender Mailboxes</h2>
         <Button
           onClick={() => fetchMailboxes(true)}
-          disabled={mailboxesLoading || refreshingMailboxes}
+          disabled={mailboxesLoading || refreshingMailboxes || mailboxesFetching}
           variant="outline"
           size="sm"
           className="h-8 px-2 text-xs"
