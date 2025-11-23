@@ -229,7 +229,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="container mx-auto max-w-7xl">
+    <div className="container mx-auto max-w-7xl px-0">
 
       {error && (
         <Card className="mb-8 border-destructive/50 bg-destructive/10">
@@ -247,7 +247,10 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      <div className="mt-5 mb-5 flex justify-end">
+      <div className="mb-5 flex justify-between items-center">
+        <h2 className="text-lg font-normal text-foreground h-8 flex items-center">
+          {campaigns.length} Running Campaigns
+        </h2>
         <Button
           onClick={() => fetchCampaigns(true)}
           disabled={loading || refreshingCampaigns}
@@ -264,7 +267,7 @@ export default function DashboardPage() {
       </div>
 
       <Card>
-        <CardContent className="p-0">
+        <CardContent className="p-0 pt-1">
           <Table>
             <TableHeader>
               <TableRow>
@@ -394,7 +397,10 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
-      <div className="mt-12 mb-5 flex justify-end">
+      <div className="mt-12 mb-5 flex justify-between items-center">
+        <h2 className="text-lg font-normal text-foreground h-8 flex items-center">
+          {mailboxes.length} Total Mailboxes
+        </h2>
         <Button
           onClick={() => fetchMailboxes(true)}
           disabled={mailboxesLoading || refreshingMailboxes || mailboxesFetching}
