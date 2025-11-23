@@ -954,3 +954,5 @@ async def set_campaign_inactive(campaign_id: str):
 from mangum import Mangum
 handler = Mangum(app, lifespan="off")
 
+# Deployment version: 03c6935 - All FastAPI code in index.py to avoid import issues
+
