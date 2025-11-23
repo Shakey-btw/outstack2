@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator"
 import { Info, X } from "lucide-react"
 import { Spinner } from "@/components/ui/spinner"
 import { ArrowCounterClockwiseIcon } from "@/components/ui/icons/akar-icons-arrow-counter-clockwise"
+import { getApiBaseUrl } from "@/lib/utils"
 
 interface CampaignData {
   campaign_id: string
@@ -54,8 +55,9 @@ export default function DashboardPage() {
         setLoading(true)
       }
       setError(null)
-      console.log("[fetchCampaigns] Making API call to http://localhost:8000/api/campaigns/dashboard")
-      const response = await fetch("http://localhost:8000/api/campaigns/dashboard", {
+      const apiUrl = `${getApiBaseUrl()}/api/campaigns/dashboard`
+      console.log("[fetchCampaigns] Making API call to", apiUrl)
+      const response = await fetch(apiUrl, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -99,8 +101,9 @@ export default function DashboardPage() {
       } else {
         setMailboxesLoading(true)
       }
-      console.log("[fetchMailboxes] Making API call to http://localhost:8000/api/mailboxes")
-      const response = await fetch("http://localhost:8000/api/mailboxes", {
+      const apiUrl = `${getApiBaseUrl()}/api/mailboxes`
+      console.log("[fetchMailboxes] Making API call to", apiUrl)
+      const response = await fetch(apiUrl, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -138,7 +141,7 @@ export default function DashboardPage() {
     }
 
     try {
-      const response = await fetch(`http://localhost:8000/api/mailboxes/${mailboxId}/start-lemwarm`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/mailboxes/${mailboxId}/start-lemwarm`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -166,7 +169,7 @@ export default function DashboardPage() {
     }
 
     try {
-      const response = await fetch(`http://localhost:8000/api/mailboxes/${mailboxId}/stop-lemwarm`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/mailboxes/${mailboxId}/stop-lemwarm`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -207,7 +210,7 @@ export default function DashboardPage() {
 
   const setCampaignInactive = async (campaignId: string, campaignName: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/campaigns/${campaignId}/set-inactive`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/campaigns/${campaignId}/set-inactive`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
